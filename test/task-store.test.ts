@@ -359,6 +359,31 @@ describe("TaskStore (file-backed)", () => {
     expect(store2.list()).toHaveLength(2);
   });
 
+  it("persists execution stats metadata to disk", () => {
+    const store1 = new TaskStore(testListId);
+    store1.create("Measured task", "Desc");
+    store1.update("1", {
+      metadata: {
+        executionStats: {
+          startedAt: 1_700_000_000_000,
+          completedAt: 1_700_000_060_000,
+          durationMs: 60_000,
+          inputTokens: 1200,
+          outputTokens: 400,
+        },
+      },
+    });
+
+    const store2 = new TaskStore(testListId);
+    expect(store2.get("1")!.metadata.executionStats).toEqual({
+      startedAt: 1_700_000_000_000,
+      completedAt: 1_700_000_060_000,
+      durationMs: 60_000,
+      inputTokens: 1200,
+      outputTokens: 400,
+    });
+  });
+
   it("restores all tasks across instances", () => {
     const store1 = new TaskStore(testListId);
     store1.create("Pending", "Desc");

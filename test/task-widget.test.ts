@@ -79,7 +79,8 @@ describe("TaskWidget", () => {
     expect(lines[1]).toContain("Do something");
   });
 
-  it("renders in-progress tasks with ◼ icon", () => {
+  it("renders in-progress tasks with ◼ icon, start time, and duration", () => {
+    vi.setSystemTime(new Date("2026-04-13T15:04:00Z"));
     store.create("Working on it", "Desc");
     store.update("1", { status: "in_progress" });
     widget.update();
@@ -87,6 +88,41 @@ describe("TaskWidget", () => {
     const lines = renderWidget(ui.state);
     expect(lines[1]).toContain("◼");
     expect(lines[1]).toContain("Working on it");
+    expect(lines[1]).toMatch(/started .*:\d{2}:\d{2}/);
+    expect(lines[1]).toContain("0s");
+  });
+
+  it("persists start time metadata for non-active in-progress tasks on update", () => {
+    vi.setSystemTime(new Date("2026-04-13T15:04:00Z"));
+    store.create("Plain in-progress", "Desc");
+
+    vi.advanceTimersByTime(60_000);
+    store.update("1", { status: "in_progress" });
+    widget.update();
+
+    expect(store.get("1")!.metadata.executionStats).toEqual({
+      startedAt: 1776092700000,
+      inputTokens: 0,
+      outputTokens: 0,
+    });
+  });
+
+  it("uses in-progress transition time when backfilling later completion stats", () => {
+    vi.setSystemTime(new Date("2026-04-13T15:04:00Z"));
+    store.create("Transition baseline", "Desc");
+
+    vi.advanceTimersByTime(60_000);
+    store.update("1", { status: "in_progress" });
+    widget.update();
+
+    vi.advanceTimersByTime(30_000);
+    store.update("1", { status: "completed" });
+    widget.update();
+
+    const lines = renderWidget(ui.state);
+    expect(lines[1]).toContain("~~#1 Transition baseline~~");
+    expect(lines[1]).toContain("30s");
+    expect(lines[1]).not.toContain("1m 30s");
   });
 
   it("renders completed tasks with ✔ icon and strikethrough", () => {
@@ -99,7 +135,187 @@ describe("TaskWidget", () => {
     expect(lines[1]).toContain("~~#1 Done task~~");
   });
 
-  it("renders active tasks with spinner icon", () => {
+  it("persists start time metadata as soon as a task starts", () => {
+    vi.setSystemTime(new Date("2026-04-13T15:04:00Z"));
+    store.create("Started task", "Desc", "Working");
+    store.update("1", { status: "in_progress" });
+    widget.setActiveTask("1", true);
+
+    expect(store.get("1")!.metadata.executionStats).toEqual({
+      startedAt: 1776092640000,
+      inputTokens: 0,
+      outputTokens: 0,
+    });
+  });
+
+  it("persists completed task stats after execution finishes", () => {
+    vi.setSystemTime(new Date("2026-04-13T15:04:00Z"));
+    store.create("Finished task", "Desc", "Working");
+    store.update("1", { status: "in_progress" });
+    widget.setActiveTask("1", true);
+
+    widget.addTokenUsage(1500, 800);
+    vi.advanceTimersByTime(65_000);
+
+    store.update("1", { status: "completed" });
+    widget.setActiveTask("1", false);
+
+    const lines = renderWidget(ui.state);
+    expect(lines[1]).toContain("~~#1 Finished task~~");
+    expect(lines[1]).toMatch(/started .*:\d{2}:\d{2}/);
+    expect(lines[1]).toMatch(/ended .*:\d{2}:\d{2}/);
+    expect(lines[1]).toContain("1m 5s");
+    expect(lines[1]).toContain("↑ 1.5k");
+    expect(lines[1]).toContain("↓ 800");
+  });
+
+  it("renders persisted completed stats after widget recreation", () => {
+    store.create("Remember stats", "Desc", "Working");
+    store.update("1", { status: "in_progress" });
+    widget.setActiveTask("1", true);
+    widget.addTokenUsage(500, 200);
+
+    vi.advanceTimersByTime(5000);
+    store.update("1", { status: "completed" });
+    widget.setActiveTask("1", false);
+    widget.dispose();
+
+    const restoredUi = mockUICtx();
+    const restoredWidget = new TaskWidget(store);
+    restoredWidget.setUICtx(restoredUi.ctx);
+    restoredWidget.update();
+
+    const lines = renderWidget(restoredUi.state);
+    expect(lines[1]).toContain("~~#1 Remember stats~~");
+    expect(lines[1]).toMatch(/started .*:\d{2}:\d{2}/);
+    expect(lines[1]).toMatch(/ended .*:\d{2}:\d{2}/);
+    expect(lines[1]).toContain("5s");
+    expect(lines[1]).toContain("↑ 500");
+    expect(lines[1]).toContain("↓ 200");
+
+    restoredWidget.dispose();
+  });
+
+  it("uses the actual completion transition time when persisting stats later", () => {
+    vi.setSystemTime(new Date("2026-04-13T15:04:00Z"));
+    store.create("Delayed persist", "Desc", "Working");
+    store.update("1", { status: "in_progress" });
+    widget.setActiveTask("1", true);
+
+    vi.advanceTimersByTime(65_000);
+    store.update("1", { status: "completed" });
+
+    vi.advanceTimersByTime(120_000);
+    widget.update();
+
+    const lines = renderWidget(ui.state);
+    expect(lines[1]).toContain("~~#1 Delayed persist~~");
+    expect(lines[1]).toContain("1m 5s");
+    expect(lines[1]).toMatch(/ended .*:05:05/);
+    expect(lines[1]).not.toContain("3m 5s");
+  });
+
+  it("rehydrates persisted in-progress tasks so completion stats survive resume", () => {
+    vi.setSystemTime(new Date("2026-04-13T15:04:00Z"));
+    store.create("Resume me", "Desc", "Working");
+    store.update("1", { status: "in_progress" });
+
+    const restoredUi = mockUICtx();
+    const restoredWidget = new TaskWidget(store);
+    restoredWidget.setUICtx(restoredUi.ctx);
+    restoredWidget.update();
+
+    vi.advanceTimersByTime(65_000);
+    store.update("1", { status: "completed" });
+    restoredWidget.update();
+
+    const lines = renderWidget(restoredUi.state);
+    expect(lines[1]).toContain("~~#1 Resume me~~");
+    expect(lines[1]).toContain("1m 5s");
+    expect(lines[1]).toMatch(/ended .*:05:05/);
+
+    restoredWidget.dispose();
+  });
+
+  it("renders persisted in-progress stats after widget recreation", () => {
+    vi.setSystemTime(new Date("2026-04-13T15:05:30Z"));
+    store.create("Resume display", "Desc", undefined, {
+      executionStats: {
+        startedAt: Date.parse("2026-04-13T15:04:00Z"),
+        inputTokens: 1200,
+        outputTokens: 3400,
+      },
+    });
+    store.update("1", { status: "in_progress" });
+
+    const restoredUi = mockUICtx();
+    const restoredWidget = new TaskWidget(store);
+    restoredWidget.setUICtx(restoredUi.ctx);
+    restoredWidget.update();
+
+    const lines = renderWidget(restoredUi.state);
+    expect(lines[1]).toContain("◼");
+    expect(lines[1]).toContain("Resume display");
+    expect(lines[1]).toContain("1m 30s");
+    expect(lines[1]).toContain("↑ 1.2k");
+    expect(lines[1]).toContain("↓ 3.4k");
+
+    restoredWidget.dispose();
+  });
+
+  it("ignores malformed execution stats metadata when rendering completed tasks", () => {
+    store.create("Broken stats", "Desc");
+    store.update("1", {
+      status: "completed",
+      metadata: {
+        executionStats: { startedAt: "nope", completedAt: null },
+      } as any,
+    });
+    widget.update();
+
+    const lines = renderWidget(ui.state);
+    expect(lines[1]).toContain("~~#1 Broken stats~~");
+    expect(lines[1]).toMatch(/started .*:\d{2}:\d{2}/);
+    expect(lines[1]).toMatch(/ended .*:\d{2}:\d{2}/);
+  });
+
+  it("backfills stats for direct pending-to-completed transitions", () => {
+    vi.setSystemTime(new Date("2026-04-13T15:04:00Z"));
+    store.create("Fast finish", "Desc");
+
+    vi.advanceTimersByTime(65_000);
+    store.update("1", { status: "completed" });
+    widget.setActiveTask("1", false);
+
+    const lines = renderWidget(ui.state);
+    expect(lines[1]).toContain("~~#1 Fast finish~~");
+    expect(lines[1]).toContain("1m 5s");
+    expect(lines[1]).not.toContain("↑");
+    expect(lines[1]).not.toContain("↓");
+  });
+
+  it("uses blocker completion time when backfilling direct completion stats", () => {
+    vi.setSystemTime(new Date("2026-04-13T15:04:00Z"));
+    store.create("Blocker", "Desc");
+    store.create("Blocked", "Desc");
+    store.update("2", { addBlockedBy: ["1"] });
+
+    vi.advanceTimersByTime(60_000);
+    store.update("1", { status: "completed" });
+    widget.setActiveTask("1", false);
+
+    vi.advanceTimersByTime(120_000);
+    store.update("2", { status: "completed" });
+    widget.setActiveTask("2", false);
+
+    const lines = renderWidget(ui.state);
+    const blockedLine = lines.find(l => l.includes("Blocked"));
+    expect(blockedLine).toContain("2m");
+    expect(blockedLine).not.toContain("3m");
+  });
+
+  it("renders active tasks with spinner icon, start time, and duration", () => {
+    vi.setSystemTime(new Date("2026-04-13T15:04:00Z"));
     store.create("Running thing", "Desc", "Processing data");
     store.update("1", { status: "in_progress" });
     widget.setActiveTask("1", true);
@@ -107,6 +323,8 @@ describe("TaskWidget", () => {
     const lines = renderWidget(ui.state);
     // Should show activeForm text with "…" suffix
     expect(lines[1]).toContain("Processing data…");
+    expect(lines[1]).toMatch(/started .*:\d{2}:\d{2}/);
+    expect(lines[1]).toContain("0s");
     // Should NOT show ◼ for active task
     expect(lines[1]).not.toContain("◼");
   });
@@ -183,6 +401,36 @@ describe("TaskWidget", () => {
     const activeLine = lines.find(l => l.includes("Running…"));
     expect(activeLine).toContain("↑ 1.5k");
     expect(activeLine).toContain("↓ 800");
+  });
+
+  it("preserves persisted start time and tokens when a resumed task becomes active", () => {
+    vi.setSystemTime(new Date("2026-04-13T15:06:00Z"));
+    store.create("Resumed active", "Desc", "Continuing", {
+      executionStats: {
+        startedAt: Date.parse("2026-04-13T15:04:00Z"),
+        inputTokens: 1000,
+        outputTokens: 500,
+      },
+    });
+    store.update("1", { status: "in_progress" });
+
+    widget.setActiveTask("1", true);
+    widget.addTokenUsage(250, 125);
+
+    const lines = renderWidget(ui.state);
+    const activeLine = lines.find(l => l.includes("Continuing…"));
+    expect(activeLine).toContain("2m");
+    expect(activeLine).toContain("↑ 1.3k");
+    expect(activeLine).toContain("↓ 625");
+
+    store.update("1", { status: "completed" });
+    widget.setActiveTask("1", false);
+
+    expect(store.get("1")!.metadata.executionStats).toMatchObject({
+      startedAt: Date.parse("2026-04-13T15:04:00Z"),
+      inputTokens: 1250,
+      outputTokens: 625,
+    });
   });
 
   it("deactivates a task with setActiveTask(id, false)", () => {
@@ -263,7 +511,8 @@ describe("TaskWidget", () => {
     expect(lines[1]).toContain("My Subject…");
   });
 
-  it("shows elapsed time but no token arrows when tokens are zero", () => {
+  it("shows start time and elapsed time but no token arrows when tokens are zero", () => {
+    vi.setSystemTime(new Date("2026-04-13T15:04:00Z"));
     store.create("No tokens", "Desc", "Working");
     store.update("1", { status: "in_progress" });
     widget.setActiveTask("1", true);
@@ -274,6 +523,7 @@ describe("TaskWidget", () => {
 
     const lines = renderWidget(ui.state);
     const activeLine = lines.find(l => l.includes("Working…"));
+    expect(activeLine).toMatch(/started .*:\d{2}:\d{2}/);
     expect(activeLine).toContain("5s");
     expect(activeLine).not.toContain("↑");
     expect(activeLine).not.toContain("↓");

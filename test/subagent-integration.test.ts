@@ -503,6 +503,66 @@ describe("Standalone operation (no subagents extension)", () => {
     expect(result.content[0].text).toContain("in_progress");
   });
 
+  it("TaskGet shows persisted start time for in-progress tasks", async () => {
+    await mock.executeTool("TaskCreate", { subject: "Started", description: "desc" });
+    await mock.executeTool("TaskUpdate", {
+      taskId: "1",
+      metadata: {
+        executionStats: {
+          startedAt: 1_700_000_000_000,
+          inputTokens: 0,
+          outputTokens: 0,
+        },
+      },
+    });
+
+    const result = await mock.executeTool("TaskGet", { taskId: "1" });
+    expect(result.content[0].text).toContain("Execution stats: started");
+    expect(result.content[0].text).not.toContain("ended ");
+  });
+
+  it("TaskGet renders valid execution stats separately from metadata", async () => {
+    await mock.executeTool("TaskCreate", { subject: "Measured", description: "desc" });
+    await mock.executeTool("TaskUpdate", {
+      taskId: "1",
+      metadata: {
+        executionStats: {
+          startedAt: 1_700_000_000_000,
+          completedAt: 1_700_000_065_000,
+          durationMs: 65_000,
+          inputTokens: 1200,
+          outputTokens: 400,
+        },
+        note: "kept",
+      },
+    });
+
+    const result = await mock.executeTool("TaskGet", { taskId: "1" });
+    expect(result.content[0].text).toContain("Execution stats: started");
+    expect(result.content[0].text).toContain("1m 5s");
+    expect(result.content[0].text).toContain("↑ 1.2k");
+    expect(result.content[0].text).toContain("↓ 400");
+    expect(result.content[0].text).toContain('Metadata: {"note":"kept"}');
+    expect(result.content[0].text).not.toContain('"executionStats"');
+  });
+
+  it("TaskGet leaves malformed execution stats in raw metadata", async () => {
+    await mock.executeTool("TaskCreate", { subject: "Broken", description: "desc" });
+    await mock.executeTool("TaskUpdate", {
+      taskId: "1",
+      metadata: {
+        executionStats: {
+          startedAt: "bad",
+          completedAt: null,
+        },
+      },
+    });
+
+    const result = await mock.executeTool("TaskGet", { taskId: "1" });
+    expect(result.content[0].text).not.toContain("Execution stats:");
+    expect(result.content[0].text).toContain('Metadata: {"executionStats":{"startedAt":"bad","completedAt":null}}');
+  });
+
   it("TaskExecute gracefully refuses without subagents", async () => {
     await mock.executeTool("TaskCreate", {
       subject: "Agent task",

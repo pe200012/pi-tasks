@@ -22,6 +22,7 @@ import { AutoClearManager } from "./auto-clear.js";
 import { ProcessTracker } from "./process-tracker.js";
 import { TaskStore } from "./task-store.js";
 import { loadTasksConfig } from "./tasks-config.js";
+import { isCompletedTaskExecutionStats, isTaskExecutionStats } from "./types.js";
 import { openSettingsMenu } from "./ui/settings-menu.js";
 import { TaskWidget, type UICtx } from "./ui/task-widget.js";
 
@@ -36,6 +37,30 @@ function debug(...args: unknown[]) {
 
 function textResult(msg: string) {
   return { content: [{ type: "text" as const, text: msg }], details: undefined as any };
+}
+
+function formatDuration(ms: number): string {
+  const totalSec = Math.floor(ms / 1000);
+  if (totalSec < 60) return `${totalSec}s`;
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  if (min < 60) return sec > 0 ? `${min}m ${sec}s` : `${min}m`;
+  const hr = Math.floor(min / 60);
+  const remMin = min % 60;
+  return remMin > 0 ? `${hr}h ${remMin}m` : `${hr}h`;
+}
+
+function formatTokens(n: number): string {
+  if (n < 1000) return String(n);
+  return (n / 1000).toFixed(1).replace(/\.0$/, "") + "k";
+}
+
+function formatClockTime(ms: number): string {
+  return new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(ms);
 }
 
 /** Task tool names — used to detect task tool usage for reminder suppression. */
@@ -565,10 +590,33 @@ Returns full task details:
         lines.push(`Blocks: ${task.blocks.map(id => "#" + id).join(", ")}`);
       }
 
-      // Show metadata if non-empty
-      const metaKeys = Object.keys(task.metadata);
+      const executionStats = isTaskExecutionStats(task.metadata.executionStats)
+        ? task.metadata.executionStats
+        : undefined;
+      const completedStats = isCompletedTaskExecutionStats(task.metadata.executionStats)
+        ? task.metadata.executionStats
+        : undefined;
+      if (completedStats) {
+        const tokenParts: string[] = [];
+        if ((completedStats.inputTokens ?? 0) > 0) tokenParts.push(`↑ ${formatTokens(completedStats.inputTokens ?? 0)}`);
+        if ((completedStats.outputTokens ?? 0) > 0) tokenParts.push(`↓ ${formatTokens(completedStats.outputTokens ?? 0)}`);
+        lines.push(
+          `Execution stats: started ${formatClockTime(completedStats.startedAt)} · ` +
+          `ended ${formatClockTime(completedStats.completedAt ?? 0)} · ` +
+          `${formatDuration(completedStats.durationMs ?? 0)}` +
+          (tokenParts.length > 0 ? ` · ${tokenParts.join(" ")}` : "")
+        );
+      } else if (executionStats) {
+        lines.push(`Execution stats: started ${formatClockTime(executionStats.startedAt)}`);
+      }
+
+      // Show metadata if non-empty. When execution stats are valid, render them separately.
+      const metadataForDisplay = executionStats
+        ? Object.fromEntries(Object.entries(task.metadata).filter(([key]) => key !== "executionStats"))
+        : task.metadata;
+      const metaKeys = Object.keys(metadataForDisplay);
       if (metaKeys.length > 0) {
-        lines.push(`Metadata: ${JSON.stringify(task.metadata)}`);
+        lines.push(`Metadata: ${JSON.stringify(metadataForDisplay)}`);
       }
 
       return Promise.resolve(textResult(lines.join("\n")));
