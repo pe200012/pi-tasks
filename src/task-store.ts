@@ -108,6 +108,31 @@ export class TaskStore {
     }
   }
 
+  createMany(items: Array<{ subject: string; description: string; activeForm?: string; metadata?: Record<string, any> }>): Task[] {
+    return this.withLock(() => {
+      const now = Date.now();
+      const created: Task[] = [];
+      for (const item of items) {
+        const task: Task = {
+          id: String(this.nextId++),
+          subject: item.subject,
+          description: item.description,
+          status: "pending",
+          activeForm: item.activeForm,
+          owner: undefined,
+          metadata: item.metadata ?? {},
+          blocks: [],
+          blockedBy: [],
+          createdAt: now,
+          updatedAt: now,
+        };
+        this.tasks.set(task.id, task);
+        created.push(task);
+      }
+      return created;
+    });
+  }
+
   create(subject: string, description: string, activeForm?: string, metadata?: Record<string, any>): Task {
     return this.withLock(() => {
       const now = Date.now();

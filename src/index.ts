@@ -2,7 +2,8 @@
  * @tintinweb/pi-tasks — A pi extension providing Claude Code-style task tracking and coordination.
  *
  * Tools:
- *   TaskCreate   — Create a structured task
+ *   TaskCreate      — Create a structured task
+ *   TaskCreateMany — Create multiple tasks in one call
  *   TaskList     — List all tasks with status
  *   TaskGet      — Get full task details
  *   TaskUpdate   — Update task fields, status, dependencies
@@ -39,7 +40,7 @@ function textResult(msg: string) {
 }
 
 /** Task tool names — used to detect task tool usage for reminder suppression. */
-const TASK_TOOL_NAMES = new Set(["TaskCreate", "TaskList", "TaskGet", "TaskUpdate", "TaskOutput", "TaskStop", "TaskExecute"]);
+const TASK_TOOL_NAMES = new Set(["TaskCreate", "TaskCreateMany", "TaskList", "TaskGet", "TaskUpdate", "TaskOutput", "TaskStop", "TaskExecute"]);
 
 /** How many turns without task tool usage before injecting a reminder. */
 const REMINDER_INTERVAL = 4;
@@ -463,7 +464,79 @@ All tasks are created with status \`pending\`.
   });
 
   // ──────────────────────────────────────────────────
-  // Tool 2: TaskList
+  // Tool 2: TaskCreateMany
+  // ──────────────────────────────────────────────────
+
+  pi.registerTool({
+    name: "TaskCreateMany",
+    label: "TaskCreateMany",
+    description: `Use this tool to create multiple structured tasks in a single call. Prefer this over repeated TaskCreate calls when you know all tasks upfront.
+
+## When to Use This Tool
+
+- When planning a multi-step effort and all tasks are known at once
+- When the user provides a list of things to be done (numbered or comma-separated)
+- When you want to batch-create tasks without repeated round-trips
+
+## When NOT to Use This Tool
+
+Skip using this tool when:
+- You only have one task to create (use TaskCreate instead)
+- The task list depends on the output of prior work
+
+## Task Fields (per item)
+
+- **subject**: A brief, actionable title in imperative form
+- **description**: Detailed description of what needs to be done
+- **activeForm** (optional): Present continuous form for the spinner (e.g., "Fixing bug")
+- **agentType** (optional): Agent type for subagent execution via TaskExecute
+- **metadata** (optional): Arbitrary key-value pairs
+
+## Tips
+
+- Use TaskUpdate afterwards to set up dependencies (blocks/blockedBy) between the created tasks
+- IDs are assigned sequentially in the order tasks appear in the array`,
+    promptGuidelines: [
+      "Use TaskCreateMany when you have multiple tasks to create at once — it is more efficient than calling TaskCreate in a loop.",
+      "After bulk creation, use TaskUpdate to wire up any blocks/blockedBy dependencies between tasks.",
+    ],
+    parameters: Type.Object({
+      tasks: Type.Array(
+        Type.Object({
+          subject: Type.String({ description: "A brief title for the task" }),
+          description: Type.String({ description: "A detailed description of what needs to be done" }),
+          activeForm: Type.Optional(Type.String({ description: "Present continuous form shown in spinner when in_progress" })),
+          agentType: Type.Optional(Type.String({ description: "Agent type for subagent execution via TaskExecute" })),
+          metadata: Type.Optional(Type.Record(Type.String(), Type.Any(), { description: "Arbitrary metadata to attach to the task" })),
+        }),
+        { description: "Array of tasks to create", minItems: 1 },
+      ),
+    }),
+
+    execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      autoClear.resetBatchCountdown();
+      const items = params.tasks.map(t => {
+        const meta = t.metadata ?? {};
+        if (t.agentType) meta.agentType = t.agentType;
+        return {
+          subject: t.subject,
+          description: t.description,
+          activeForm: t.activeForm,
+          metadata: Object.keys(meta).length > 0 ? meta : undefined,
+        };
+      });
+      const created = store.createMany(items);
+      widget.update();
+      const lines = [`Created ${created.length} task${created.length === 1 ? "" : "s"}:`];
+      for (const task of created) {
+        lines.push(`  #${task.id} ${task.subject}`);
+      }
+      return Promise.resolve(textResult(lines.join("\n")));
+    },
+  });
+
+  // ──────────────────────────────────────────────────
+  // Tool 3: TaskList
   // ──────────────────────────────────────────────────
 
   pi.registerTool({
@@ -529,7 +602,7 @@ Use TaskGet with a specific task ID to view full details including description a
   });
 
   // ──────────────────────────────────────────────────
-  // Tool 3: TaskGet
+  // Tool 4: TaskGet
   // ──────────────────────────────────────────────────
 
   pi.registerTool({
@@ -600,7 +673,7 @@ Returns full task details:
   });
 
   // ──────────────────────────────────────────────────
-  // Tool 4: TaskUpdate
+  // Tool 5: TaskUpdate
   // ──────────────────────────────────────────────────
 
   pi.registerTool({
@@ -729,7 +802,7 @@ Set up task dependencies:
   });
 
   // ──────────────────────────────────────────────────
-  // Tool 5: TaskOutput
+  // Tool 6: TaskOutput
   // ──────────────────────────────────────────────────
 
   pi.registerTool({
@@ -805,7 +878,7 @@ Set up task dependencies:
   });
 
   // ──────────────────────────────────────────────────
-  // Tool 6: TaskStop
+  // Tool 7: TaskStop
   // ──────────────────────────────────────────────────
 
   pi.registerTool({
@@ -856,7 +929,7 @@ Set up task dependencies:
   });
 
   // ──────────────────────────────────────────────────
-  // Tool 7: TaskExecute
+  // Tool 8: TaskExecute
   // ──────────────────────────────────────────────────
 
   pi.registerTool({

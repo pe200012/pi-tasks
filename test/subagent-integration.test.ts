@@ -994,3 +994,87 @@ describe("Cascade data injection (buildTaskPrompt)", () => {
     expect(bPrompt).not.toContain("Prerequisite task results");
   });
 });
+
+// ──────────────────────────────────────────────────────────────────────────────
+// TaskCreateMany tool tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe("TaskCreateMany", () => {
+  let mock: ReturnType<typeof mockPi>;
+
+  beforeEach(() => {
+    mock = mockPi();
+    initExtension(mock.pi as any);
+  });
+
+  it("is registered as a tool", () => {
+    expect(mock.tools.has("TaskCreateMany")).toBe(true);
+  });
+
+  it("creates multiple tasks and returns a summary", async () => {
+    const result = await mock.executeTool("TaskCreateMany", {
+      tasks: [
+        { subject: "Step one", description: "Do the first thing" },
+        { subject: "Step two", description: "Do the second thing" },
+        { subject: "Step three", description: "Do the third thing" },
+      ],
+    });
+
+    const text = result.content[0].text as string;
+    expect(text).toContain("Created 3 tasks");
+    expect(text).toContain("#1 Step one");
+    expect(text).toContain("#2 Step two");
+    expect(text).toContain("#3 Step three");
+  });
+
+  it("created tasks appear in TaskList", async () => {
+    await mock.executeTool("TaskCreateMany", {
+      tasks: [
+        { subject: "Alpha", description: "A" },
+        { subject: "Beta", description: "B" },
+      ],
+    });
+
+    const list = await mock.executeTool("TaskList", {});
+    const text = list.content[0].text as string;
+    expect(text).toContain("Alpha");
+    expect(text).toContain("Beta");
+  });
+
+  it("supports agentType stored in metadata", async () => {
+    await mock.executeTool("TaskCreateMany", {
+      tasks: [
+        { subject: "Agent task", description: "Run me", agentType: "general-purpose" },
+      ],
+    });
+
+    const details = await mock.executeTool("TaskGet", { taskId: "1" });
+    expect(details.content[0].text).toContain("general-purpose");
+  });
+
+  it("IDs are sequential after prior TaskCreate calls", async () => {
+    await mock.executeTool("TaskCreate", {
+      subject: "Existing",
+      description: "Already here",
+    });
+
+    const result = await mock.executeTool("TaskCreateMany", {
+      tasks: [
+        { subject: "Bulk A", description: "D" },
+        { subject: "Bulk B", description: "D" },
+      ],
+    });
+
+    const text = result.content[0].text as string;
+    expect(text).toContain("#2 Bulk A");
+    expect(text).toContain("#3 Bulk B");
+  });
+
+  it("returns singular wording for a single task", async () => {
+    const result = await mock.executeTool("TaskCreateMany", {
+      tasks: [{ subject: "Just one", description: "Lonely task" }],
+    });
+
+    expect(result.content[0].text).toContain("Created 1 task:");
+  });
+});

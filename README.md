@@ -12,7 +12,7 @@ https://github.com/user-attachments/assets/1d0ee87a-e0a5-4bfa-a9b9-2f9144cb905b
 
 ## Features
 
-- **7 LLM-callable tools** — `TaskCreate`, `TaskList`, `TaskGet`, `TaskUpdate`, `TaskOutput`, `TaskStop`, `TaskExecute` — matching Claude Code's exact tool specs and descriptions
+- **8 LLM-callable tools** — `TaskCreate`, `TaskCreateMany`, `TaskList`, `TaskGet`, `TaskUpdate`, `TaskOutput`, `TaskStop`, `TaskExecute` — matching Claude Code's exact tool specs and descriptions
 - **Persistent widget** — live task list above the editor with `✔`/`◼`/`◻` status icons, task numbers (`#1`, `#2`, …), strikethrough for completed tasks, star spinner (`✳✽`) for active tasks with elapsed time and token counts
 - **System-reminder injection** — periodic `<system-reminder>` nudges appended to tool results when task tools haven't been used recently (matches Claude Code's behavior exactly)
 - **Prompt guidelines** — workflow contract encoded in tool descriptions, nudging the LLM at the point of tool use
@@ -69,6 +69,26 @@ Create a structured task. Used proactively for complex multi-step work.
 
 ```
 → Task #1 created successfully: Fix authentication bug
+```
+
+### `TaskCreateMany`
+
+Create multiple structured tasks in a single call. More efficient than repeated `TaskCreate` calls when all tasks are known upfront.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `tasks` | array | yes | Array of task objects (min 1) |
+| `tasks[].subject` | string | yes | Brief imperative title |
+| `tasks[].description` | string | yes | Detailed context and acceptance criteria |
+| `tasks[].activeForm` | string | no | Present continuous form for spinner |
+| `tasks[].agentType` | string | no | Agent type for subagent execution |
+| `tasks[].metadata` | object | no | Arbitrary key-value pairs |
+
+```
+→ Created 3 tasks:
+  #1 Design the API
+  #2 Implement the handler
+  #3 Write tests
 ```
 
 ### `TaskList`
