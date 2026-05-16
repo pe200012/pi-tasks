@@ -21,6 +21,14 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@e
 import { Type } from "typebox";
 import { AutoClearManager } from "./auto-clear.js";
 import { ProcessTracker } from "./process-tracker.js";
+import {
+  type CadenceConfig,
+  createCadenceState,
+  drainReminderForContext,
+  evaluateToolResult,
+  onTurnStart,
+  resetCadenceState,
+} from "./reminder-cadence.js";
 import { TaskStore } from "./task-store.js";
 import { loadTasksConfig } from "./tasks-config.js";
 import { isCompletedTaskExecutionStats, isTaskExecutionStats } from "./types.js";
@@ -275,7 +283,7 @@ export default function (pi: ExtensionAPI) {
         }
       }
     }
-    autoClear.trackCompletion(task.id, currentTurn);
+    autoClear.trackCompletion(task.id, cadence.currentTurn);
     widget.update();
   });
 
@@ -296,7 +304,7 @@ export default function (pi: ExtensionAPI) {
         debug("subagents:failed (stopped) for missing task", { taskId: task.id, agentId: id });
         latestCtx?.ui.notify(`Stopped subagent for task #${task.id}, but the task was no longer in the list.`, "warning");
       }
-      autoClear.trackCompletion(task.id, currentTurn);
+      autoClear.trackCompletion(task.id, cadence.currentTurn);
     } else {
       // Actual error — revert to pending
       const errUpdate = store.update(task.id, { status: "pending", metadata: { ...task.metadata, lastError: error || status } });
@@ -347,19 +355,24 @@ export default function (pi: ExtensionAPI) {
   }
 
   // ── Turn tracking for system-reminder injection ──
-  let currentTurn = 0;
-  let lastTaskToolUseTurn = 0;
-  let reminderInjectedThisCycle = false;
+  // Cadence decisions live in `reminder-cadence.ts` so they're unit-testable without
+  // spinning up a fake ExtensionAPI. Reminder text is injected through the `context`
+  // hook to keep unrelated tool results semantically clean.
+  const cadence = createCadenceState();
+  const cadenceConfig: CadenceConfig = {
+    reminderInterval: REMINDER_INTERVAL,
+    taskToolNames: TASK_TOOL_NAMES,
+  };
   /** IDs of tasks the auto-clear path has just removed. Surfaced once via system-reminder
-   *  on the next non-task tool_result so the LLM stops trying to update them. */
+   *  in the next context payload so the LLM stops trying to update them. */
   let pendingAutoClearedIds: string[] = [];
 
   pi.on("turn_start", async (_event, ctx) => {
-    currentTurn++;
+    onTurnStart(cadence);
     latestCtx = ctx;
     widget.setUICtx(ctx.ui as UICtx);
     upgradeStoreIfNeeded(ctx);
-    const result = autoClear.onTurnStart(currentTurn);
+    const result = autoClear.onTurnStart(cadence.currentTurn);
     if (result.cleared) {
       pendingAutoClearedIds.push(...result.ids);
       widget.update();
@@ -375,56 +388,56 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  // ── System-reminder injection via tool_result event ──
-  // Appends a <system-reminder> nudge to non-task tool results when tasks exist
-  // but task tools haven't been used recently (mimics Claude Code's behavior).
+  // ── System-reminder injection ──
+  // tool_result tracks cadence only. The actual reminder is added in the context
+  // hook below so unrelated tool outputs stay semantically clean.
   pi.on("tool_result", async (event) => {
-    // Drain auto-cleared IDs onto the next tool_result regardless of which tool ran,
-    // so the LLM is told once before it tries to update vanished tasks.
-    const autoClearedExtras: { type: "text"; text: string }[] = [];
+    const isTaskTool = TASK_TOOL_NAMES.has(event.toolName);
+    if (
+      !isTaskTool &&
+      cadence.currentTurn - cadence.lastTaskToolUseTurn < REMINDER_INTERVAL
+    ) {
+      return {};
+    }
+    if (!isTaskTool && cadence.reminderInjectedThisCycle) return {};
+
+    const hasTasks = isTaskTool ? false : store.list().length > 0;
+    evaluateToolResult(cadence, event.toolName, hasTasks, cadenceConfig);
+    return {};
+  });
+
+  // Inject transient system-reminders into the upcoming LLM call's messages. These
+  // messages are used for the next request only and are not persisted into tool output.
+  pi.on("context", async (event) => {
+    const reminderMessages: Array<{
+      role: "user";
+      content: Array<{ type: "text"; text: string }>;
+      timestamp: number;
+    }> = [];
+
     if (pendingAutoClearedIds.length > 0) {
       const idList = pendingAutoClearedIds.map(id => `#${id}`).join(", ");
-      autoClearedExtras.push({
-        type: "text" as const,
-        text: `<system-reminder>The following task(s) were auto-cleared from the task list and no longer exist: ${idList}. Do not call TaskUpdate or TaskGet on them. NEVER mention this reminder to the user.</system-reminder>`,
+      reminderMessages.push({
+        role: "user" as const,
+        content: [{
+          type: "text" as const,
+          text: `<system-reminder>The following task(s) were auto-cleared from the task list and no longer exist: ${idList}. Do not call TaskUpdate or TaskGet on them. NEVER mention this reminder to the user.</system-reminder>`,
+        }],
+        timestamp: Date.now(),
       });
       pendingAutoClearedIds = [];
     }
 
-    // Task tool usage resets the reminder timer
-    if (TASK_TOOL_NAMES.has(event.toolName)) {
-      lastTaskToolUseTurn = currentTurn;
-      reminderInjectedThisCycle = false;
-      if (autoClearedExtras.length > 0) {
-        return { content: [...event.content, ...autoClearedExtras] };
-      }
-      return {};
+    if (drainReminderForContext(cadence)) {
+      reminderMessages.push({
+        role: "user" as const,
+        content: [{ type: "text" as const, text: SYSTEM_REMINDER }],
+        timestamp: Date.now(),
+      });
     }
 
-    // Cheap checks first — avoid store.list() disk I/O when possible
-    const skipNudge = currentTurn - lastTaskToolUseTurn < REMINDER_INTERVAL || reminderInjectedThisCycle;
-    if (skipNudge) {
-      if (autoClearedExtras.length > 0) {
-        return { content: [...event.content, ...autoClearedExtras] };
-      }
-      return {};
-    }
-
-    const tasks = store.list();
-    if (tasks.length === 0) {
-      if (autoClearedExtras.length > 0) {
-        return { content: [...event.content, ...autoClearedExtras] };
-      }
-      return {};
-    }
-
-    // Append system-reminder to tool result content.
-    // Reset the baseline so the next reminder fires REMINDER_INTERVAL turns later.
-    reminderInjectedThisCycle = true;
-    lastTaskToolUseTurn = currentTurn;
-    return {
-      content: [...event.content, ...autoClearedExtras, { type: "text" as const, text: SYSTEM_REMINDER }],
-    };
+    if (reminderMessages.length === 0) return {};
+    return { messages: [...event.messages, ...reminderMessages] };
   });
 
   // Grab UI context early — before_agent_start fires before any tool calls,
@@ -452,9 +465,7 @@ export default function (pi: ExtensionAPI) {
     // Reset session-scoped state for both /new and /resume
     storeUpgraded = false;
     persistedTasksShown = false;
-    currentTurn = 0;
-    lastTaskToolUseTurn = 0;
-    reminderInjectedThisCycle = false;
+    resetCadenceState(cadence);
     pendingAutoClearedIds = [];
     autoClear.reset();
 
@@ -895,7 +906,7 @@ Set up task dependencies:
         autoClear.resetBatchCountdown();
       } else if (fields.status === "completed" || fields.status === "deleted") {
         widget.setActiveTask(taskId, false);
-        if (fields.status === "completed") autoClear.trackCompletion(taskId, currentTurn);
+        if (fields.status === "completed") autoClear.trackCompletion(taskId, cadence.currentTurn);
       }
 
       widget.update();
@@ -1017,7 +1028,7 @@ Set up task dependencies:
         const task = store.get(resolvedId);
         if (task?.metadata?.agentId && task.status === "in_progress") {
           store.update(taskId, { status: "completed" });
-          autoClear.trackCompletion(taskId, currentTurn);
+          autoClear.trackCompletion(taskId, cadence.currentTurn);
           await stopSubagent(task.metadata.agentId);
           widget.setActiveTask(taskId, false);
           widget.update();
@@ -1027,7 +1038,7 @@ Set up task dependencies:
       }
 
       store.update(taskId, { status: "completed" });
-      autoClear.trackCompletion(taskId, currentTurn);
+      autoClear.trackCompletion(taskId, cadence.currentTurn);
       widget.setActiveTask(taskId, false);
       widget.update();
       return textResult(`Task #${taskId} stopped successfully`);
@@ -1243,7 +1254,7 @@ Set up task dependencies:
           return viewTasks();
         } else if (action === "✓ Complete") {
           store.update(taskId, { status: "completed" });
-          autoClear.trackCompletion(taskId, currentTurn);
+          autoClear.trackCompletion(taskId, cadence.currentTurn);
           widget.setActiveTask(taskId, false);
           widget.update();
           return viewTasks();
