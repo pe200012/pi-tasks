@@ -8,9 +8,22 @@
  *   ✳/✽ actively executing task (star spinner with activeForm text)
  */
 
-import { truncateToWidth } from "@mariozechner/pi-tui";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { TaskStore } from "../task-store.js";
+import type { TasksConfig } from "../tasks-config.js";
 import { isCompletedTaskExecutionStats, isTaskExecutionStats, type Task, type TaskExecutionStats } from "../types.js";
+
+// ---- Truncation ----
+
+function truncateFromTop(tasks: Task[], limit: number): Task[] {
+  return tasks.slice(-limit);
+}
+
+function truncateFromBottom(tasks: Task[], limit: number): Task[] {
+  return tasks.slice(0, limit);
+}
+
+const TRUNCATE_FNS = { top: truncateFromTop, bottom: truncateFromBottom };
 
 // ---- Types ----
 
@@ -32,7 +45,7 @@ export type UICtx = {
 /** Star spinner frames for animated active task indicator (matches Claude Code). */
 const SPINNER = ["✳", "✴", "✵", "✶", "✷", "✸", "✹", "✺", "✻", "✼", "✽"];
 
-const MAX_VISIBLE_TASKS = 10;
+const DEFAULT_MAX_VISIBLE_TASKS = 10;
 
 /** Per-task runtime metrics (elapsed time, token usage). */
 export interface TaskMetrics {
@@ -95,7 +108,10 @@ export class TaskWidget {
   /** Whether the widget callback is currently registered. */
   private widgetRegistered = false;
 
-  constructor(private store: TaskStore) {}
+  constructor(
+    private store: TaskStore,
+    private config: TasksConfig = {},
+  ) {}
 
   setStore(store: TaskStore) {
     this.store = store;
@@ -260,7 +276,8 @@ export class TaskWidget {
 
   /** Build widget lines from current live state. Called from the render callback. */
   private renderWidget(tui: any, theme: Theme): string[] {
-    const tasks = this.store.list();
+    const sortOrder = this.config.sortOrder ?? "id";
+    const tasks = this.store.list(sortOrder);
     const w = tui.terminal.columns;
     const truncate = (line: string) => truncateToWidth(line, w);
 
@@ -279,7 +296,19 @@ export class TaskWidget {
     const spinnerChar = SPINNER[this.widgetFrame % SPINNER.length];
     const lines: string[] = [truncate(theme.fg("accent", "●") + " " + theme.fg("accent", statusText))];
 
-    const visible = tasks.slice(0, MAX_VISIBLE_TASKS);
+    const showAll = this.config.showAll ?? false;
+    const limit = this.config.maxVisible ?? DEFAULT_MAX_VISIBLE_TASKS;
+    const hiddenAt = this.config.hiddenAt ?? "bottom";
+    const visible = showAll ? tasks : TRUNCATE_FNS[hiddenAt](tasks, limit);
+
+    const hiddenCount = tasks.length - visible.length;
+    const overflowLine = hiddenCount > 0
+      ? truncate(theme.fg("dim", `    … and ${hiddenCount} more`))
+      : undefined;
+
+    if (overflowLine && hiddenAt === "top") {
+      lines.push(overflowLine);
+    }
     for (let i = 0; i < visible.length; i++) {
       const task = visible[i];
       const isActive = this.activeTaskIds.has(task.id) && task.status === "in_progress";
@@ -341,8 +370,8 @@ export class TaskWidget {
       lines.push(truncate(text + suffix));
     }
 
-    if (tasks.length > MAX_VISIBLE_TASKS) {
-      lines.push(truncate(theme.fg("dim", `    … and ${tasks.length - MAX_VISIBLE_TASKS} more`)));
+    if (overflowLine && hiddenAt !== "top") {
+      lines.push(overflowLine);
     }
 
     return lines;

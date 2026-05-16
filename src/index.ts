@@ -17,7 +17,7 @@
 
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { AutoClearManager } from "./auto-clear.js";
 import { ProcessTracker } from "./process-tracker.js";
@@ -111,7 +111,7 @@ export default function (pi: ExtensionAPI) {
   let store = new TaskStore(resolveStorePath());
   store.onCorruptFile = onCorruptFile;
   const tracker = new ProcessTracker();
-  const widget = new TaskWidget(store);
+  const widget = new TaskWidget(store, cfg);
 
   // ── Subagent integration state ──
   /** Latest ExtensionContext — refreshed on every tool execution so cascade always has a valid one. */
